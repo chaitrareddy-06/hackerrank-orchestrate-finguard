@@ -614,6 +614,45 @@ def _options_frame(data: Any, request_id: Optional[str] = None) -> pd.DataFrame:
     return pd.DataFrame()
 
 
+def _enrich_missing_event_amounts(events: pd.DataFrame) -> pd.DataFrame:
+    """Fill blank event amounts using verified image evidence."""
+    if events is None or events.empty:
+        return events.copy() if isinstance(events, pd.DataFrame) else events
+
+    if "event_id" not in events.columns or "amount" not in events.columns:
+        return events.copy()
+
+    try:
+        from image_resolver import resolve_blank_amount_events
+
+        resolutions = resolve_blank_amount_events()
+
+        verified = {
+            str(r.event_id): (float(r.amount), r.currency)
+            for r in resolutions
+            if r.amount is not None and r.confidence == "verified_image"
+        }
+
+        enriched = events.copy()
+
+        for idx, row in enriched.iterrows():
+            event_id = str(row["event_id"])
+
+            if pd.isna(row["amount"]) and event_id in verified:
+                amount, currency = verified[event_id]
+                enriched.at[idx, "amount"] = amount
+
+                if "currency" in enriched.columns and currency:
+                    if pd.isna(enriched.at[idx, "currency"]):
+                        enriched.at[idx, "currency"] = currency
+
+        return enriched
+
+    except Exception as exc:
+        print(f"WARNING: image evidence enrichment failed: {exc}")
+        return events.copy()
+
+
 def reconcile_request(
     data: Any,
     request_id: str,
@@ -641,7 +680,7 @@ def reconcile_request(
     desired_completion = _to_date(_row_get(request, "desired_completion_date"))
     home_currency = _clean_text(_row_get(profile, "home_currency")).upper()
 
-    request_events = _events_for_user(data, user_id)
+    request_events = _enrich_missing_event_amounts(_events_for_user(data, user_id))
 
     protected = _pipe_list(_row_get(profile, "expense_categories_to_protect"))
     reducible = _pipe_list(_row_get(profile, "expense_categories_user_is_willing_to_reduce"))
@@ -803,3 +842,6 @@ if __name__ == "__main__":
         "pending_debit_reserve_sum": round(total_pending_reserve, 2),
         "requests_with_missing_amount_events": missing_states,
     })
+
+
+
